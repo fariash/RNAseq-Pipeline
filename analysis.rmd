@@ -1,0 +1,243 @@
+---
+title: "Project 2: RNA-seq Analysis"
+author: "Faria Shahriar"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+library(DESeq2)
+library(ggplot2)
+library(dplyr)
+```
+
+## Load Counts Matrix
+
+```{r load}
+counts <- read.delim("results/counts_matrix.tsv",
+                     row.names = 1, check.names = FALSE)
+counts <- counts[-1, ]
+
+counts[] <- lapply(counts, as.numeric)
+
+```
+
+## Filter Counts Matrix
+
+```{r filter}
+keep <- rowSums(counts >= 10) >= 3
+filtered_counts <- counts[keep, ]
+
+before <- nrow(counts)
+after  <- nrow(filtered_counts)
+
+filter_table <- data.frame(
+  Metric = c("Genes before filtering",
+             "Genes after filtering"),
+  Value = c(before, after)
+)
+
+knitr::kable(filter_table, caption = "Table 1. Summary of gene filtering results")
+
+par(mfrow = c(1, 2))
+hist(log10(rowSums(counts) + 1), 
+     breaks = 50, 
+     main = "Before Filtering", 
+     xlab = "log10(Total Counts per Gene)", 
+     col = "lightblue")
+
+hist(log10(rowSums(filtered_counts) + 1), 
+     breaks = 50, 
+     main = "After Filtering", 
+     xlab = "log10(Total Counts per Gene)", 
+     col = "lightgreen")
+par(mfrow = c(1, 1))
+
+```
+
+## Filtering Strategy Report
+I filtered the counts matrix to retain only genes with at least 10 read counts in three or more samples. This threshold removes genes with minimal or no expression across replicates, reducing noise and improving the robustness of downstream differential expression analysis.
+
+## Perform Differential Expression Analysis
+```{r}
+library(DESeq2)
+library(tidyverse)
+
+filtered_counts <- data.frame(lapply(filtered_counts, as.numeric),
+                             row.names = rownames(filtered_counts))
+filtered_counts[is.na(filtered_counts)] <- 0
+coldata <- data.frame(
+  row.names = colnames(filtered_counts),
+  condition = c("control", "control", "experiment", "experiment", "experiment", "control")
+)
+
+```
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = filtered_counts,
+                              colData = coldata,
+                              design = ~ condition)
+
+```
+
+```{r}
+dds <- DESeq(dds)
+res <- results(dds)
+
+```
+
+```{r}
+library(dplyr)
+
+res_df <- as.data.frame(res)
+
+gene_names <- read.table("/projectnb/bf528/students/farias/project-2-fariash/results/gene_map.txt",
+                         header = TRUE, sep = "\t")
+
+merged_res <- res_df %>%
+  tibble::rownames_to_column("ensembl_id") %>%       # move rownames into a column
+  left_join(gene_names, by = c("ensembl_id" = "gene_id")) %>%  # join on matching ID columns
+  relocate(gene_name, .before = ensembl_id)          # move gene_name to the front
+
+```
+
+## Top 10 Significant Genes
+
+```{r top10}
+sorted_padj_res <- merged_res %>%
+  arrange(padj)
+
+top10_padj <- sorted_padj_res %>%
+  slice(1:10)
+top10_padj
+
+```
+
+## Significance Genes Threshold
+```{r siggenes}
+upreg_sig_genes <- sorted_padj_res %>% filter(padj < 0.05 & log2FoldChange > 1) %>% select(gene_name)
+write.table(upreg_sig_genes, file = "results/upreg_sig_genes.txt", col.names = F, row.names = F, quote = F)
+upreg_sig_genes_count <- nrow(upreg_sig_genes)
+
+downreg_sig_genes <- sorted_padj_res %>% filter(padj < 0.05 & log2FoldChange <= -1) %>% select(gene_name)
+write.table(downreg_sig_genes, file = "results/downreg_sig_genes.txt", col.names = F, row.names = F, quote = F)
+downreg_sig_genes_count <- nrow(downreg_sig_genes)
+
+print(paste("Upregulated Genes:", upreg_sig_genes_count))
+print(paste("Downregulated Genes", downreg_sig_genes_count))
+
+```
+## Enrichr Analysis
+
+### Significant Upregulated Genes
+![](results/enrichr_upregulated.png)
+
+### Significant Downregulated Genes
+![](results/enrichr_downregulated.png)
+
+
+The Enrichr analysis showed that many of the upregulated genes are linked to transcription factors like SUZ12, EZH2, and REST, which are known to control genes involved in cell growth and cancer. These regulators are part of complexes that change how DNA is packaged (such as the Polycomb Repressive Complex 2) and can turn on genes that help cells divide or stay in a stem-like state. In contrast, the downregulated genes were connected to factors such as ASCL2, FOXL2, and HNF4A, which normally help control cell differentiation and apoptosis (programmed cell death). This suggests that under the experimental condition, genes promoting cell growth become more active, while genes that support cell death and normal development are turned down.
+Overall, the results point to a pattern often seen in cancer-like or proliferative states, where growth pathways are activated and apoptotic pathways are suppressed.
+
+### RNAseq Quality Control Plots
+```{r}
+library(DESeq2)
+library(pheatmap)
+library(ggplot2)
+
+vsd <- vst(dds, blind = FALSE) 
+norm_counts <- assay(vsd)
+head(norm_counts)
+plotPCA(vsd, intgroup = "condition")
+
+
+```
+```{r}
+library(DESeq2)
+library(pheatmap)
+library(RColorBrewer)
+
+sample_dists <- dist(t(assay(vsd)))
+sampleDistMatrix <- as.matrix(sample_dists)
+
+rownames(sampleDistMatrix) <- paste(vsd$condition, rownames(colData(vsd)), sep = "_")
+colnames(sampleDistMatrix) <- paste(vsd$condition, rownames(colData(vsd)), sep = "_")
+
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sample_dists,
+         clustering_distance_cols = sample_dists,
+         col = colors,
+         main = "Sample-to-Sample Distance Heatmap (VST Normalized)",
+         fontsize = 11)
+
+```
+
+The PCA plot demonstrates clear separation between control and experimental samples, indicating that the main source of variation in gene expression corresponds to the experimental condition. Replicates within each group cluster closely together, suggesting strong consistency and minimal technical noise. The first principal component (PC1) explains 86% of the variance, showing that condition-driven changes dominate the expression landscape, while PC2 accounts for minor differences between replicates.
+
+The sample-to-sample distance heat map reinforces the PCA findings, showing two distinct clusters corresponding to the control and experimental conditions. Samples within each condition exhibit low pairwise distances, highlighting reproducibility across replicates. The larger distances between groups suggest widespread transcriptional reprogramming driven by the treatment. Together, these results indicate that the experimental manipulation had a strong and consistent effect on global gene expression patterns.
+
+
+## FGSEA Analysis
+```{r}
+if (!require("fgsea")) {
+  BiocManager::install("fgsea")
+}
+library(fgsea)
+library(dplyr)
+library(tibble)
+```
+
+```{r}
+deseq2_res_ordered <- merged_res %>%
+  drop_na(log2FoldChange, gene_name) %>%           
+  distinct(gene_name, .keep_all = TRUE) %>%        
+  arrange(desc(log2FoldChange))                    
+
+rnk_list <- setNames(deseq2_res_ordered$log2FoldChange, deseq2_res_ordered$gene_name)
+
+head(rnk_list, 10)
+```
+
+```{r}
+library(fgsea)
+library(dplyr)
+library(tibble)
+
+pathways <- gmtPathways("results/c2.cp.v2025.1.Hs.symbols.gmt")
+
+
+fgseaRes <- fgsea(pathways = pathways,
+stats = rnk_list,
+minSize = 15,
+maxSize = 500)
+
+
+fgseaRes <- fgseaRes[order(padj), ]
+head(fgseaRes)
+
+
+topPathwaysUp <- fgseaRes[ES > 0][head(order(pval), n = 10), pathway]
+topPathwaysDown <- fgseaRes[ES < 0][head(order(pval), n = 10), pathway]
+topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+
+plotGseaTable(pathways[topPathways], rnk_list, fgseaRes, gseaParam = 0.5)
+
+```
+```
+```
+### FGSEA Analysis Report
+Using FGSEA with the C2 canonical pathways collection, several biologically relevant pathways were significantly enriched (padj < 0.01). The most significant terms included REACTOME_NEURONAL_SYSTEM and WP_ADHD_AND_AUTISM_ASD_PATHWAYS, both negatively enriched, suggesting a downregulation of genes involved in neuronal signaling, synaptic communication, and neurodevelopmental functions in the experimental condition. In contrast, positively enriched pathways such as PID_P53_DOWNSTREAM_PATHWAY and WP_IL18_SIGNALING point to an activation of stress-response, apoptosis, and inflammatory signaling networks. Together, these results suggest that the experimental treatment may suppress neuronal and developmental gene programs while upregulating cellular stress and immune-related responses, consistent with a shift from normal signaling activity toward stress or damage-associated processes.
+
+```{r}
+install.packages('sessioninfo')
+```
+
+```{r}
+sessioninfo::session_info()
+```
+
+
+

@@ -1,0 +1,478 @@
+---
+title: "Project 2 Report"
+author: "Faria Shahriar"
+output: html_document
+---
+
+### **Introduction**
+
+Type 1 diabetes (T1D) is an autoimmune disease characterized by the
+destruction of pancreatic β-cells, which are responsible for insulin
+production and blood glucose regulation. Recent genetic studies have
+identified TYK2, a Janus kinase involved in type I interferon (IFN-I)
+signaling, as a susceptibility gene for T1D, suggesting that it may
+influence both β-cell development and immune responses (Chandra et al., 2022). 
+This study was performed to investigate how TYK2 affects β-cell differentiation,
+maturation, and vulnerability to immune attack. To achieve this, the
+authors used a combination of stem-cell differentiation models, RNA
+sequencing, and bioinformatic analyses to examine gene expression
+changes associated with TYK2 loss or inhibition. These computational
+approaches allowed the researchers to uncover global transcriptional
+programs, identify affected pathways such as KRAS signaling and antigen
+presentation, and integrate molecular findings with functional assays to
+reveal TYK2’s dual role in regulating β-cell identity and immune
+protection.
+
+### **Methods**
+
+#### **RNA-seq Data Processing**
+
+Paired-end FASTQ files for all samples were processed through a Nextflow
+(25.04.6) [1] pipeline executed on the Boston University Shared
+Computing Cluster. Quality control was performed using **FastQC
+(v0.12.1)** [2] to assess per-base quality, adapter content, and GC
+distribution under default parameters. **MultiQC (v1.25)** [3] was run once across all FastQC and STAR log outputs to aggregate quality metrics into a single report.
+
+#### **Reference Preparation**
+
+The **GRCh38 (primary assembly)** genome and the corresponding **GENCODE
+v45 annotation (GTF)** were used to build a **STAR (v2.7.11b)** [4] genome index with default parameters and the flag `--runThreadN ${task.cpus}`. The GTF was
+parsed with a custom Python (3.13.7) [5] script run in the **Pandas
+(v2.3.3)** [6] container to produce a tab-delimited mapping of Ensembl
+gene IDs to gene symbols.
+
+#### **Alignment and Quantification**
+
+Reads were aligned to the reference genome GRCh38 using **STAR_ALIGN
+(v2.7.11b)** [4] with default parameters and the options
+`--readFilesCommand zcat`, `--outSAMtype BAM Unsorted`, and
+`--runThreadN ${task.cpus}`. The `--genomeDir` flag specified the precomputed STAR index, and the `--outFileNamePrefix` parameter appended sample identifiers to all output files. Log outputs (`*.Log.final.out`) were retained for
+post-alignment QC. Gene-level counts were generated with **VERSE
+(v0.1.5)** [7] using the `-S` flag. Per-sample count tables were
+concatenated into a single matrix using a custom Python script within (pandas
+v2.3.3) container.
+
+#### **Differential Expression Analysis**
+
+All downstream analysis was conducted in **R (v4.4.3)**[8] with **DESeq2
+(v1.46.0)** [9]. Raw counts were imported as a
+`DESeqDataSet.` Low-expression genes were filtered out by requiring ≥10
+raw counts in at least 3 samples. Genes not meeting this criterion were
+removed prior to DE analysis, and normalized with the default
+median-ratio method. Differential expression between control and experimental conditions was tested using the Wald test. Genes with adjusted p \< 0.05 and \|log₂FoldChange\| \> 1 were considered significantly up- or down-regulated.
+
+#### **Functional Enrichment**
+
+Significant genes were analyzed with **Enrichr** [10] to identify
+enriched biological pathways. In addition, **FGSEA (v1.32.4)** [11] was
+applied on the full ranked list (ranked by Wald statistic) using the **MSigDB C2.CP v2025.1 Hs** [12] gene sets with parameters
+`minSize = 15`, `maxSize = 500`, and default permutations. Pathways were ranked by adjusted p-value to highlight the most significantly enriched terms.
+
+#### **Normalization and Visualization**
+
+Variance-stabilizing transformation (**vst**) was applied to normalized
+counts (`blind = FALSE`) to reduce heteroscedasticity. Principal
+component analysis (PCA) was performed using
+`plotPCA(vsd, intgroup = "condition")`. Sample-to-sample Euclidean
+distances were visualized as a clustered heatmap via **pheatmap
+(v1.0.12)** [13].
+
+### **Quality Control Evaluation**
+
+Across all six RNA-seq samples, total read counts ranged from \~84 M to
+\~119 M reads per sample. Per-base sequence quality scores remained
+consistently high (median Phred \> 30), and read length was 151 bp.
+FASTQC flagged no major issues aside from minimal adapter content (≤
+0.02 %), and duplication levels were modest (9–18 %). STAR alignment
+showed \~97–98 % total mapped reads, with 93–94 % uniquely aligned, and
+mismatch/indel rates \< 0.5 %. Collectively, these metrics indicate that
+the sequencing and alignment were of high quality, with the data
+suitable for reliable downstream differential expression analysis.
+
+### **Filtering the counts matrix**
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+library(DESeq2)
+library(ggplot2)
+library(dplyr)
+```
+
+#### **Load Counts Matrix**
+
+```{r load}
+counts <- read.delim("results/counts_matrix.tsv",
+                     row.names = 1, check.names = FALSE)
+counts <- counts[-1, ]
+
+counts[] <- lapply(counts, as.numeric)
+
+```
+
+#### **Filter Counts**
+
+```{r filter}
+keep <- rowSums(counts >= 10) >= 3
+filtered_counts <- counts[keep, ]
+before <- nrow(counts)
+after  <- nrow(filtered_counts)
+filter_table <- data.frame(
+  Metric = c("Genes before filtering",
+             "Genes after filtering"),
+  Value = c(before, after)
+)
+knitr::kable(filter_table, caption = "Table 1. Summary of gene filtering results")
+par(mfrow = c(1, 2))
+hist(log10(rowSums(counts) + 1), 
+     breaks = 50, 
+     main = "Before Filtering", 
+     xlab = "log10(Total Counts per Gene)", 
+     col = "lightblue")
+hist(log10(rowSums(filtered_counts) + 1), 
+     breaks = 50, 
+     main = "After Filtering", 
+     xlab = "log10(Total Counts per Gene)", 
+     col = "lightgreen")
+```
+
+To improve data quality and remove uninformative genes, we filtered the
+raw counts matrix based on minimum expression thresholds. Specifically,
+genes were retained if they had at least 10 reads in three or more
+samples, ensuring that only transcripts expressed above background in
+multiple replicates were analyzed. Before filtering, the dataset
+contained 63,241 genes, and after filtering 20,579 genes remained
+(see Table 1). This filtering step reduces noise from low-abundance
+transcripts that are unlikely to be statistically informative in
+downstream differential expression analysis. The count distributions
+before and after filtering (Figures 1 and 2) show that filtering
+primarily removed low-count genes while preserving the overall structure
+of the dataset.
+
+### **Differential Expression Analysis**
+
+#### **Performing Differential Expression**
+
+```{r}
+library(DESeq2)
+library(tidyverse)
+
+filtered_counts <- data.frame(lapply(filtered_counts, as.numeric),
+                             row.names = rownames(filtered_counts))
+filtered_counts[is.na(filtered_counts)] <- 0
+coldata <- data.frame(
+  row.names = colnames(filtered_counts),
+  condition = c("control", "control", "experiment", "experiment", "experiment", "control")
+)
+
+```
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = filtered_counts,
+                              colData = coldata,
+                              design = ~ condition)
+
+```
+
+```{r}
+dds <- DESeq(dds)
+res <- results(dds)
+
+```
+
+```{r}
+library(dplyr)
+
+res_df <- as.data.frame(res)
+
+gene_names <- read.table("/projectnb/bf528/students/farias/project-2-fariash/results/gene_map.txt",
+                         header = TRUE, sep = "\t")
+
+merged_res <- res_df %>%
+  tibble::rownames_to_column("ensembl_id") %>%       # move rownames into a column
+  left_join(gene_names, by = c("ensembl_id" = "gene_id")) %>%  # join on matching ID columns
+  relocate(gene_name, .before = ensembl_id)          # move gene_name to the front
+
+```
+
+#### **Top 10 Significant Genes**
+
+```{r top10}
+sorted_padj_res <- merged_res %>%
+  arrange(padj)
+
+top10_padj <- sorted_padj_res %>%
+  slice(1:10)
+top10_padj
+
+```
+
+#### **Significant Genes Threshold**
+
+```{r siggenes}
+upreg_sig_genes <- sorted_padj_res %>% filter(padj < 0.05 & log2FoldChange > 1) %>% select(gene_name)
+write.table(upreg_sig_genes, file = "results/upreg_sig_genes.txt", col.names = F, row.names = F, quote = F)
+upreg_sig_genes_count <- nrow(upreg_sig_genes)
+
+downreg_sig_genes <- sorted_padj_res %>% filter(padj < 0.05 & log2FoldChange <= -1) %>% select(gene_name)
+write.table(downreg_sig_genes, file = "results/downreg_sig_genes.txt", col.names = F, row.names = F, quote = F)
+downreg_sig_genes_count <- nrow(downreg_sig_genes)
+
+print(paste("Upregulated Genes:", upreg_sig_genes_count))
+print(paste("Downregulated Genes", downreg_sig_genes_count))
+
+```
+
+#### **Enrichr Analysis**
+
+Significant Upregulated Genes ![](results/enrichr_upregulated.png)
+
+Significant Downregulated Genes ![](results/enrichr_downregulated.png)
+
+#### **FGSEA Analysis**
+
+```{r}
+if (!require("fgsea")) {
+  BiocManager::install("fgsea")
+}
+library(fgsea)
+library(dplyr)
+library(tibble)
+
+deseq2_res_ordered <- merged_res %>%
+  drop_na(log2FoldChange, gene_name) %>%           
+  distinct(gene_name, .keep_all = TRUE) %>%        
+  arrange(desc(log2FoldChange))                    
+
+rnk_list <- setNames(deseq2_res_ordered$log2FoldChange, deseq2_res_ordered$gene_name)
+
+head(rnk_list, 10)
+```
+
+```{r}
+library(fgsea)
+library(dplyr)
+library(tibble)
+
+pathways <- gmtPathways("results/c2.cp.v2025.1.Hs.symbols.gmt")
+
+
+fgseaRes <- fgsea(pathways = pathways,
+stats = rnk_list,
+minSize = 15,
+maxSize = 500)
+
+
+fgseaRes <- fgseaRes[order(padj), ]
+head(fgseaRes)
+
+
+topPathwaysUp <- fgseaRes[ES > 0][head(order(pval), n = 10), pathway]
+topPathwaysDown <- fgseaRes[ES < 0][head(order(pval), n = 10), pathway]
+topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+
+plotGseaTable(pathways[topPathways], rnk_list, fgseaRes, gseaParam = 0.5)
+
+```
+
+#### **Report**
+
+Differential expression analysis was done using DESeq2 (v1.46.0) [9] on
+the filtered count matrix. Genes with fewer than 10 counts in at least
+three samples were removed to reduce noise, leaving a cleaner dataset
+for downstream analysis. The data were normalized using DESeq2’s default
+median-ratio method, and differences between control and experimental
+samples were tested using the Wald test with Benjamini–Hochberg
+correction for multiple testing. Genes were considered significant if
+they had an adjusted p-value (padj) \< 0.05 and an absolute log₂ fold
+change of 1 or higher. Based on this threshold, 106 genes were upregulated and 177 were downregulated.
+The top 10 most significant genes, ranked by adjusted p-value,
+represented those that changed the most between conditions.
+
+An Enrichr analysis was used to identify biological processes and transcription factors associated with these significant genes. Upregulated genes were enriched for regulators such as SUZ12, EZH2, and REST, components of the Polycomb Repressive Complex 2 (PRC2) that control chromatin accessibility and maintain progenitor-like states. These transcriptional signatures suggest activation of chromatin-modifying and proliferative programs. In contrast, factors associated with the downregulated genes—including ASCL2, FOXL2, and HNF4A motifs—are linked to cellular differentiation and apoptosis. This indicates reduced activity of pathways that promote maturation, consistent with a shift toward stress-adaptive or undifferentiated cell states.
+
+To assess pathway-level trends, FGSEA (v1.32.4) [11] was run using the MSigDB C2 canonical pathway collection. Genes were ranked by their log₂ fold change, and pathways were tested for enrichment using parameters minSize = 15, maxSize = 500. Several pathways were significantly enriched (padj < 0.05). Negatively enriched pathways such as REACTOME_NEURONAL_SYSTEM and WP_ADHD_AND_AUTISM_ASD_PATHWAYS indicated reduced expression of genes involved in neuronal signaling and differentiation, while positively enriched pathways including PID_P53_DOWNSTREAM_PATHWAY and WP_IL18_SIGNALING reflected activation of stress, apoptotic, and immune signaling processes.
+
+Together, the Enrichr and FGSEA analyses reveal a consistent transcriptional trend: the experimental condition redirects gene expression away from normal neuronal and β-cell differentiation toward programs associated with chromatin remodeling, proliferation, and stress response. These observations parallel the regulatory shifts reported by Chandra et al. (2022) and suggest that TYK2 perturbation alters cell-state regulation through coordinated transcriptional reprogramming.
+
+### **RNAseq Quality Control**
+
+#### **PCA Plot**
+
+```{r}
+library(DESeq2)
+library(pheatmap)
+library(ggplot2)
+
+vsd <- vst(dds, blind = FALSE) 
+norm_counts <- assay(vsd)
+head(norm_counts)
+plotPCA(vsd, intgroup = "condition")
+
+```
+
+#### **Heatmap**
+
+```{r}
+library(DESeq2)
+library(pheatmap)
+library(RColorBrewer)
+
+sample_dists <- dist(t(assay(vsd)))
+sampleDistMatrix <- as.matrix(sample_dists)
+
+rownames(sampleDistMatrix) <- paste(vsd$condition, rownames(colData(vsd)), sep = "_")
+colnames(sampleDistMatrix) <- paste(vsd$condition, rownames(colData(vsd)), sep = "_")
+
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sample_dists,
+         clustering_distance_cols = sample_dists,
+         col = colors,
+         main = "Sample-to-Sample Distance Heatmap (VST Normalized)",
+         fontsize = 11)
+
+```
+
+#### **Report**
+
+Normalized expression values were generated using the
+variance-stabilizing transformation (VST) from DESeq2 (v1.46.0) [9] to
+reduce the dependence of variance on mean expression. These normalized
+counts were then used for principal component analysis (PCA) and
+sample-to-sample distance visualization. The PCA plot shows clear
+separation between control and experimental samples, indicating that the
+primary source of variation in gene expression corresponds to the
+experimental condition. Replicates within each group cluster tightly
+together, suggesting strong reproducibility and minimal technical noise.
+The first principal component (PC1) captures the majority of expression
+variance, while PC2 accounts for smaller within-group differences.
+
+The sample-to-sample distance heatmap further supports the PCA findings.
+Two distinct clusters are visible, corresponding to the control and
+experimental groups, with short intra-group distances reflecting
+consistent sample quality. The greater distances between conditions
+indicate robust transcriptional changes induced by the experimental
+treatment. Together, these visualizations demonstrate that the RNA-seq
+data are of high quality and that the experiment successfully captured
+biologically meaningful expression differences between the two groups.
+
+### **Figures 3C and 3F**
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+volcano_data <- merged_res %>%
+  mutate(
+    significance = ifelse(padj < 0.05 & log2FoldChange > 1, "Upregulated",
+                   ifelse(padj < 0.05 & log2FoldChange < -1, "Downregulated", "Not Significant"))
+  )
+
+ggplot(volcano_data, aes(x = log2FoldChange, y = -log10(pvalue), color = significance)) +
+  geom_point(alpha = 0.8, size = 1.8) +
+  scale_color_manual(values = c("Upregulated" = "red",
+                                "Downregulated" = "skyblue",
+                                "Not Significant" = "gray")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") +
+  coord_cartesian(ylim = c(0, 20)) +                                     #
+  scale_y_continuous(breaks = seq(0, 20, 5)) +                           #
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Volcano Plot of Differentially Expressed Genes",
+    x = "Expression difference (log2 Fold Change)",
+    y = "Significance (-log10 p-value)",
+    color = "Gene Regulation"
+  )
+
+```
+
+```{r}
+knitr::opts_chunk$set(fig.width = 100, fig.height = 6, dpi = 300)
+
+library(ggplot2)
+library(dplyr)
+library(forcats)
+library(scales)
+library(stringr)
+
+top_fgsea <- fgseaRes %>%
+  arrange(padj) %>%
+  slice_head(n = 8) %>%
+  mutate(
+    pathway = str_replace_all(pathway, "_", " "),
+    pathway = str_wrap(pathway, width = 40),
+    pathway = fct_reorder(pathway, -log10(padj)),
+    neglog10padj = -log10(padj)
+  )
+
+ggplot(top_fgsea, aes(y = pathway, x = neglog10padj, fill = padj)) +
+  geom_col(width = 0.8, color = "black") +
+  scale_fill_gradientn(
+    colors = c("red", "magenta", "blue"),
+    values = rescale(c(0.001, 0.01, 0.05)),
+    name = "Adjusted p-value"
+  ) +
+  labs(
+    x = expression(-log[10]("adjusted p-value")),
+    y = NULL,
+    title = "Reactome Enrichment"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "left",
+    axis.text.y = element_text(size = 11, face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.margin = margin(t = 10, r = 60, b = 10, l = 10) 
+  )
+```
+
+### **Discussion**
+
+In Nature Communications, Chandra et al. (2022) characterized the transcriptional consequences of TYK2 knockout (KO) during pancreatic differentiation. Using bulk RNA-seq at the endocrine progenitor stage (S5), they identified 319 upregulated and 412 downregulated genes (FDR < 0.01). Reactome enrichment revealed suppression of β-cell development and β-cell gene-expression pathways (NEUROD1, PAX4, INSM1, ONECUT1) alongside activation of receptor tyrosine kinase (RTK) and extracellular matrix (ECM) signaling (KRAS, SPP1, COL2A1). These findings suggested that TYK2 loss impairs endocrine commitment while promoting proliferative and structural remodeling programs.
+
+Applying equivalent criteria (padj < 0.05, |log₂ fold change| > 1) to the present dataset yielded a smaller number of significant genes (on the order of 150–200 total), reflecting differences in read depth and filtering thresholds but demonstrating the same directional pattern of regulation. The volcano plot showed distinct sets of up and downregulated genes, with the strongest effects corresponding to chromatin and signaling related loci (e.g., PCDHGA10, SLC2A14, ENSG00000289575, RPS4Y1).
+
+Functional enrichment analyses were consistent with those reported by Chandra et al. Upregulated genes were enriched for chromatin modifying and proliferative transcription factors such as SUZ12, EED, PHC1, and REST, as well as TF perturbation signatures for Fli1, MYCN, and POU1F1, indicating activation of programs linked to progenitor maintenance and structural signaling. Downregulated genes included NEUROD1, HAND2, and PAX2, reflecting suppression of endocrine and neuronal differentiation processes analogous to those observed in TYK2-KO cells.
+
+FGSEA using the MSigDB C2.CP collection—which integrates Reactome, WikiPathways, KEGG, and BioCarta identified highly significant pathways (padj < 0.01) including REACTOME_NEURONAL_SYSTEM, WP_CELL_LINEAGE_MAP_FOR_NEURONAL_DIFFERENTIATION, PID_P53_DOWNSTREAM_PATHWAY, PID_INTEGRIN1_PATHWAY, and REACTOME_EXTRACELLULAR_MATRIX_ORGANIZATION. Negative enrichment of neuronal and β-cell pathways indicated repressed differentiation, while positive enrichment of ECM and signaling-associated pathways reflected enhanced structural and stress-response activity. The presence of additional pathways such as WP_ADHD_AND_AUTISM_ASD_PATHWAYS likely arose from the broader multi-database gene-set coverage in MSigDB, whereas Chandra et al. limited enrichment to Reactome via g:Profiler.
+
+Together, these results demonstrate strong concordance between the two analyses: TYK2 perturbation reprograms transcriptional networks away from endocrine differentiation toward ECM remodeling, stress response, and proliferative signaling, consistent with RTK-driven modulation of pancreatic progenitor fate rather than opposing biological trends.
+
+
+### **References**
+
+[1] Nextflow v25.04.6. Available at: <https://www.nextflow.io/>
+
+[2] FastQC v0.12.1. Available at:
+<https://www.bioinformatics.babraham.ac.uk/projects/fastqc/>
+
+[3] MultiQC v1.25. Available at: <https://github.com/MultiQC/MultiQC>
+
+[4] STAR v2.7.11b. Available at: <https://github.com/alexdobin/STAR>
+
+[5] Python v3.13.7. Available at:
+<https://www.python.org/downloads/release/python-3137/>
+
+[6] Pandas v2.3.3. Available at: <https://pypi.org/project/pandas/>
+
+[7] Verse v0.1.5. Available at:
+<https://kim.bio.upenn.edu/software/verse.shtml>
+
+[8] R v4.4.3. Available at: <https://www.r-project.org/>
+
+[9] DESeq2 v1.46.0. Available at:
+<https://bioconductor.org/packages/release/bioc/html/DESeq2.html>
+
+[10] Enrichr Available at: <https://maayanlab.cloud/Enrichr/>
+
+[11] FGSEA v1.32.4. Available at:
+<https://bioconductor.org/packages/release/bioc/html/fgsea.html>
+
+[12] MSigDB C2.CP v2025.1 Hs. Available at:
+<https://www.gsea-msigdb.org/gsea/msigdb/collections.jsp>
+
+[13] Pheatmap v1.0.12. Available at:
+<https://cran.r-project.org/web/packages/pheatmap/index.html>
